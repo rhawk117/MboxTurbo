@@ -16,8 +16,10 @@ def default_factory(raw_bytes: bytes):
     `message_from_binary_file(..., policy=policy.default)`.
     """
     with BytesIO(raw_bytes) as buf:
-        # type: ignore
-        return message_from_binary_file(buf, policy=policy.default)
+        return message_from_binary_file(
+            buf,
+            policy=policy.default  # type: ignore
+        )
 
 
 class MboxTurboEngine(Generic[T]):
@@ -38,13 +40,12 @@ class MboxTurboEngine(Generic[T]):
 
         if offset_map is not None:
             self.offset_map = offset_map
+
         else:
             self.offset_map = MboxOffsetMap(mbox_path)
 
-    def build_index(self, threads: int = 1) -> None:
-        """
-        builds the offset map if not already built, specify multi-threading.
-        """
+    def init_offsets(self, threads: int = 1) -> None:
+        """builds the offset map if not already built, specify multi-threading."""
         self.offset_map.build(threads=threads)
 
     def get_message_total(self) -> int:
@@ -66,10 +67,16 @@ class MboxTurboEngine(Generic[T]):
                 raw_bytes = f.read(end_offset - start_offset)
             else:
                 raw_bytes = f.read()
+
         return self.factory(raw_bytes)
 
-    def read_messages_in_range(self, start_idx: int, end_idx: int) -> Iterator[T]:
-        """iterator for messages in a certain range"""
+    def iter_range(self, start_idx: int, end_idx: int) -> Iterator[T]:
+        """
+        iterator for the a range of email msgs
+
+        start_idx: the index of the first mbox message to read
+        end_idx: the index of the last mbox message to read
+        """
         if start_idx < 0:
             start_idx = 0
 
@@ -79,7 +86,7 @@ class MboxTurboEngine(Generic[T]):
         for i in range(start_idx, end_idx + 1):
             yield self.read_message(i)
 
-    def read_messages_by_indices(self, indices: Sequence[int]) -> Iterator[T]:
+    def iter_indices(self, indices: Sequence[int]) -> Iterator[T]:
         """yields messages for a specific list/sequence of indices."""
         for i in indices:
             yield self.read_message(i)
