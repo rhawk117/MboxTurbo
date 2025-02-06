@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import os
 import re
 import math
@@ -7,169 +6,162 @@ from typing import List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from array import array
 
-MSG_START = re.compile(rb"^From ")
+FROM_LINE_RE = re.compile(rb"^From ")
 
 
 class MboxOffsetMap:
-    """
-    builds a sorted list of message start offsets by scanning an mbox file.
+    '''
+    A collection with magic methods representing the byte offsets of each of the emails 
+    in a MBOX file.
+    '''
 
-    feats:
-      - multi-threading to accelerate chunk scanning.
-      - exporting/importing offsets to/from a *binary* file.
-      -  __getitem__() for getting nth message offset and __len__() for
-        total messages.
-    """
-
-    def __init__(self, mbox_path: Optional[str] = None) -> None:
-        self.mbox_path: Optional[str] = mbox_path
-        self.offsets: Optional[List[int]] = None
-
-    def build(self, threads: int = 1) -> None:
-        """
-        searches mbox file and finds every "From " boundary.
-        if 'threads' > 1, attempts a simple multi-threaded approach by
-        dividing the file into chunks.
-        """
-        if self.mbox_path is None:
-            raise ValueError(
-                "[MBOX_TURBO] - Cannot create offset map without an mbox path.")
-
-        if self.offsets is not None:
-            return
-
-        file_size = os.path.getsize(self.mbox_path)
-        if file_size == 0:
-            self.offsets = []
-            return
-
-        if threads <= 1:
-            self._unthreaded_builder()
-        else:
-            self._threaded_builder(threads)
-
-        if self.offsets:
-            self.offsets = sorted(set(self.offsets))
-
-    def _unthreaded_builder(self) -> None:
-        """no multi-threaded, linear traversal of the entire mbox. """
-        self.offsets = []
-        current_offset = 0
-        global MSG_START
-        if self.mbox_path is None:
-            raise ValueError(
-                "[MBOX_TURBO] - Cannot create offset map without an mbox path.")
-
-        with open(self.mbox_path, "rb") as f:
-            for line in f:
-                if MSG_START.match(line):
-                    self.offsets.append(current_offset)
-                current_offset += len(line)
-
-    def _threaded_builder(self, threads: int) -> None:
-        """
-        splits the file into roughly equal chunks of bytes, 
-        each scanned in a separate thread.
-        """
-
-        file_size = os.path.getsize(self.mbox_path)
-        chunk_size = math.ceil(file_size / threads)
-
-        results = []
-        with ThreadPoolExecutor(max_workers=threads) as executor:
-            exc_results = []
-            for i in range(threads):
-                start = i * chunk_size
-                end = min(file_size, (i + 1) * chunk_size)
-
-                if start >= file_size:
-                    break
-
-                exc_task = executor.submit(
-                    self._scan_chunk,
-                    start,
-                    end
-                )
-                exc_results.append(exc_task)
-
-            for offet_results in as_completed(exc_results):
-                chunk_offsets = offet_results.result()
-                results.extend(chunk_offsets)
-
-        self.offsets = results
-
-    def _scan_chunk(self, chunk_start: int, chunk_end: int) -> List[int]:
-        """
-        reads [chunk_start:chunk_end) of the file, scanning line by line
-        to find lines that start with "From "; returns the absolute offsets.
-        """
-        offsets = []
-        global MSG_START
-        if chunk_start > chunk_end:
-            return offsets
-        
-        with open(self.mbox_path, "rb") as f:
-            f.seek(chunk_start)
-            offset_idx = chunk_start
-
-            while offset_idx < chunk_end:
-                line = f.readline()
-
-                if not line:
-                    break
-
-                if MSG_START.match(line):
-                    offsets.append(offset_idx)
-
-                offset_idx += len(line)
-
-                if offset_idx >= chunk_end:
-                    break
-        return offsets
+    def __init__(self, mbox_path: str, offsets: Optional[array] = None) -> None:
+        '''
+        mbox_path: Path to the mbox file.
+        offsets: Optional array('Q') of offsets.
+        '''
+        self.mbox_path: str = mbox_path
+        self.offsets: array = offsets if offsets is not None else array('Q')
 
     def __getitem__(self, index: int) -> int:
-        """gets the offset of the nth item of an mbox"""
-        if self.offsets is None:
-            raise RuntimeError("Offsets not built or imported yet.")
+        '''Returns the offset at the specified index.'''
         return self.offsets[index]
 
     def __len__(self) -> int:
-        """number of offsets (messages) stored."""
-        return 0 if (self.offsets is None) else len(self.offsets)
+        '''Returns the total number of offsets.'''
+        return len(self.offsets)
 
-    def export_bin(self, file_path: str) -> None:
-        """
-        exports class stored offsets to a binary file,
-        the file can have any name or extension 
-        notes:
-          - keeps an 8-byte 'count' (unsigned 64-bit),
-          - this count is followed by that many 8-byte 
-            offsets (array of 'Q').
-        """
-        if self.offsets is None:
-            raise RuntimeError(
-                "No offsets to export. Call build() first or import them."
-            )
-        arr = array('Q', self.offsets)
+    @classmethod
+    def create(cls, mbox_path, threads=1) -> MboxOffsetMap:
+        '''Creates an offset map given a path to an MBOX file.'''
+        return _OffsetInitializer.create(mbox_path, threads)
+
+    def export(self, file_path: str) -> None:
+        '''Exports the offset map to a binary file.'''
+        _OffsetInitializer.export(self, file_path)
+
+    @classmethod
+    def import_offsets(cls, mbox_path: str, bin_file: str) -> MboxOffsetMap:
+        '''Imports an offset map from a binary file.'''
+        return _OffsetInitializer.import_(
+            mbox_path, 
+            bin_file
+        )
+
+
+class _OffsetInitializer:
+    '''Utility class for creating and managing MboxOffsetMap instances.'''
+
+    @staticmethod
+    def create(mbox_path: str, threads: int = 4) -> MboxOffsetMap:
+        '''Creates an offset map by scanning the mbox file.
+
+        Args:
+            mbox_path: Path to the mbox file.
+            threads: Number of threads for creating the offset map, default is 4.
+
+        Returns:
+            A MboxOffsetMap instance with offsets built.
+        '''
+        file_size = os.path.getsize(mbox_path)
+        if file_size == 0:
+            return MboxOffsetMap(mbox_path, array('Q'))
+
+        if threads <= 1:
+            offsets_list: List[int] = []
+            current_offset = 0
+            with open(mbox_path, "rb") as f:
+                for line in f:
+                    if FROM_LINE_RE.match(line):
+                        offsets_list.append(current_offset)
+                    current_offset += len(line)
+        else:
+            chunk_size = math.ceil(file_size / threads)
+            results: List[int] = []
+            with ThreadPoolExecutor(max_workers=threads) as executor:
+                futures = []
+                for i in range(threads):
+                    start = i * chunk_size
+                    end = min(file_size, (i + 1) * chunk_size)
+                    if start >= file_size:
+                        break
+                    futures.append(
+                        executor.submit(
+                            _OffsetInitializer._scan_chunk,
+                            mbox_path,
+                            start,
+                            end
+                        )
+                    )
+                for future in as_completed(futures):
+                    results.extend(future.result())
+            offsets_list = sorted(set(results))
+
+        offsets_arr = array('Q', offsets_list)
+        return MboxOffsetMap(mbox_path, offsets_arr)
+
+    @staticmethod
+    def _scan_chunk(mbox_path: str, chunk_start: int, chunk_end: int) -> List[int]:
+        '''Scans a chunk of the mbox file for message boundaries.
+
+        Args:
+            mbox_path: Path to the mbox file.
+            chunk_start: Starting byte offset.
+            chunk_end: Ending byte offset.
+
+        Returns:
+            A list of absolute offsets for messages found in the chunk.
+        '''
+        offsets: List[int] = []
+        with open(mbox_path, "rb") as f:
+            f.seek(chunk_start)
+            if chunk_start != 0:
+                f.readline()  # Discard partial line.
+                chunk_start = f.tell()
+            current_offset = chunk_start
+            while current_offset < chunk_end:
+                line = f.readline()
+                if not line:
+                    break
+                if FROM_LINE_RE.match(line):
+                    offsets.append(current_offset)
+                current_offset += len(line)
+                if current_offset >= chunk_end:
+                    break
+        return offsets
+
+    @staticmethod
+    def export(mbox_offset_map: MboxOffsetMap, file_path: str) -> None:
+        '''Exports the offset map to a binary file.
+
+        Args:
+            mbox_offset_map: The offset map to export.
+            file_path: Destination binary file path.
+        '''
+        arr = mbox_offset_map.offsets
         count = len(arr)
-
-        with open(file_path, mode="wb") as f:
+        with open(file_path, "wb") as f:
             header = array('Q', [count])
             f.write(header.tobytes())
             arr.tofile(f)
 
-    @classmethod
-    def import_bin(cls, bin_file: str) -> MboxOffsetMap:
-        """imports offsets from a binary file thats been exported export_bin()"""
-        instance = cls()
+    @staticmethod
+    def import_(mbox_path: str, bin_file: str) -> MboxOffsetMap:
+        '''Imports an offset map from a binary file.
+
+        Args:
+            mbox_path: Path to the mbox file.
+            bin_file: Path to the binary file with exported offsets.
+
+        Returns:
+            A MboxOffsetMap instance with imported offsets.
+        '''
+        instance = MboxOffsetMap(mbox_path)
         with open(bin_file, "rb") as f:
             header = array('Q')
             header.fromfile(f, 1)
             count = header[0]
-
             offsets_arr = array('Q')
             offsets_arr.fromfile(f, count)
-
-            instance.offsets = list(offsets_arr)
-
+            instance.offsets = offsets_arr
         return instance
