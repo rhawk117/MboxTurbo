@@ -1,5 +1,5 @@
 from src.mbox_engine import MboxTurboEngine
 from src.offset import MboxOffsetMap
-from src.mbox_reader import MboxReader
+from src.collection import MboxCollection
 
-__all__ = ["MboxTurboEngine", "MboxOffsetMap", "MboxReader"]
+__all__ = ["MboxTurboEngine", "MboxOffsetMap", "MboxCollection"]
